@@ -187,8 +187,8 @@ func newValueBlockFetcher(
 	}
 }
 
-// FetchHandle implements base.ValueFetcher.
-func (f *valueBlockFetcher) FetchHandle(
+// Fetch implements base.ValueFetcher.
+func (f *valueBlockFetcher) Fetch(
 	ctx context.Context, handle []byte, _ base.BlobFileID, valLen uint32, buf []byte,
 ) (val []byte, callerOwned bool, err error) {
 	if !f.closed {

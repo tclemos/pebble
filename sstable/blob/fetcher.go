@@ -88,9 +88,9 @@ func (r *ValueFetcher) Init(fm FileMapping, rp ReaderProvider, env block.ReadEnv
 	}
 }
 
-// FetchHandle returns the value, given the handle. FetchHandle must not be
-// called after Close.
-func (r *ValueFetcher) FetchHandle(
+// Fetch returns the value, given the handle. Fetch must not be called after
+// Close.
+func (r *ValueFetcher) Fetch(
 	ctx context.Context, handle []byte, blobFileID base.BlobFileID, valLen uint32, buf []byte,
 ) (val []byte, callerOwned bool, err error) {
 	handleSuffix := DecodeHandleSuffix(handle)
@@ -99,27 +99,6 @@ func (r *ValueFetcher) FetchHandle(
 		ValueLen:   valLen,
 		BlockID:    handleSuffix.BlockID,
 		ValueID:    handleSuffix.ValueID,
-	}
-	v, err := r.retrieve(ctx, vh)
-	if err == nil && len(v) != int(vh.ValueLen) {
-		return nil, false,
-			errors.AssertionFailedf("value length mismatch: %d != %d", len(v), vh.ValueLen)
-	}
-	if invariants.Enabled {
-		v = r.bufMangler.MaybeMangleLater(v)
-	}
-	return v, false, err
-}
-
-// Fetch is like FetchHandle, but it constructs handle and does not
-// validate the value length. Fetch must not be called after Close.
-func (r *ValueFetcher) Fetch(
-	ctx context.Context, blobFileID base.BlobFileID, blockID BlockID, valueID BlockValueID,
-) (val []byte, callerOwned bool, err error) {
-	vh := Handle{
-		BlobFileID: blobFileID,
-		BlockID:    blockID,
-		ValueID:    valueID,
 	}
 	v, err := r.retrieve(ctx, vh)
 	if invariants.Enabled {
@@ -261,10 +240,6 @@ func (cr *cachedReader) GetUnsafeValue(
 		var valueIDOffset BlockValueID
 		if cr.indexBlock.dec.virtualBlockCount > 0 {
 			physicalBlockIndex, valueIDOffset = cr.indexBlock.dec.RemapVirtualBlockID(vh.BlockID)
-			if valueIDOffset == virtualBlockIndexMask {
-				return nil, errors.AssertionFailedf("blob file indicates virtual block ID %d in %s should be unreferenced",
-					vh.BlockID, vh.BlobFileID)
-			}
 		}
 		invariants.CheckBounds(physicalBlockIndex, cr.indexBlock.dec.BlockCount())
 
@@ -291,14 +266,11 @@ func (cr *cachedReader) GetUnsafeValue(
 		cr.currentValueBlock.loaded = true
 	}
 
-	// Convert the ValueID to an index into the block's values. When a blob file
-	// is first constructed, the ValueID == the index. However when a blob file
-	// is rewritten, multiple blocks from the original blob file may be combined
-	// into the same physical block. To translate the ValueID to the
-	// apppropriate index, we need to add the 'virtual block' valueIDOffset.
-	valueIndex := int(valueID) + int(cr.currentValueBlock.valueIDOffset)
-	invariants.CheckBounds(valueIndex, cr.currentValueBlock.dec.bd.Rows())
-	v := cr.currentValueBlock.dec.values.Slice(cr.currentValueBlock.dec.values.Offsets(valueIndex))
+	invariants.CheckBounds(int(valueID), cr.currentValueBlock.dec.bd.Rows())
+	v := cr.currentValueBlock.dec.values.Slice(cr.currentValueBlock.dec.values.Offsets(int(valueID)))
+	if len(v) != int(vh.ValueLen) {
+		return nil, errors.AssertionFailedf("value length mismatch: %d != %d", len(v), vh.ValueLen)
+	}
 	return v, nil
 }
 

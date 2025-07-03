@@ -47,8 +47,7 @@ func (o *Options) testingRandomized(t testing.TB) *Options {
 			MinimumSize:           1 << rand.IntN(10), // [1, 512]
 			MaxBlobReferenceDepth: rand.IntN(10) + 1,  // [1, 10)
 			// Constrain the rewrite minimum age to [0, 15s).
-			RewriteMinimumAge:  time.Duration(rand.IntN(15)) * time.Second,
-			TargetGarbageRatio: 0.1 + rand.Float64()*0.9, // [0.1, 1.0)
+			RewriteMinimumAge: time.Duration(rand.IntN(15)) * time.Second,
 		}
 		o.Experimental.ValueSeparationPolicy = func() ValueSeparationPolicy { return policy }
 	}
@@ -589,7 +588,7 @@ func TestApplyDBCompressionSettings(t *testing.T) {
 		return profile
 	})
 
-	profile = UniformDBCompressionSettings(block.FastestCompression)
+	profile = UniformDBCompressionSettings("Test", block.FastestCompression)
 	profile.Levels[1] = block.FastestCompression
 	profile.Levels[2] = block.BalancedCompression
 	profile.Levels[3] = block.GoodCompression
@@ -597,7 +596,7 @@ func TestApplyDBCompressionSettings(t *testing.T) {
 	require.Equal(t, block.BalancedCompression, o.Levels[2].Compression())
 	require.Equal(t, block.GoodCompression, o.Levels[3].Compression())
 
-	profile = UniformDBCompressionSettings(block.FastestCompression)
+	profile = UniformDBCompressionSettings("Test2", block.FastestCompression)
 	require.Equal(t, block.FastestCompression, o.Levels[1].Compression())
 	require.Equal(t, block.FastestCompression, o.Levels[2].Compression())
 	require.Equal(t, block.FastestCompression, o.Levels[3].Compression())

@@ -9,7 +9,6 @@ import (
 	"container/heap"
 	"fmt"
 	"iter"
-	"maps"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -491,7 +490,7 @@ type currentBlobFile struct {
 	// referencing table number. This would likely be more memory efficient,
 	// reduce overall number of pointers to chase and suffer fewer allocations
 	// (and we can pool the B-Tree nodes to further reduce allocs)
-	references map[*TableMetadata]struct{}
+	references map[base.TableNum]struct{}
 	// referencedValueSize is the sum of the length of uncompressed values in
 	// this blob file that are still live.
 	referencedValueSize uint64
@@ -577,7 +576,7 @@ func (s *CurrentBlobFileSet) Init(bve *BulkVersionEdit, h BlobRewriteHeuristic) 
 	for blobFileID, pbf := range bve.BlobFiles.Added {
 		s.files[blobFileID] = &currentBlobFile{
 			metadata:   BlobFileMetadata{FileID: blobFileID, Physical: pbf},
-			references: make(map[*TableMetadata]struct{}),
+			references: make(map[base.TableNum]struct{}),
 		}
 		s.stats.Count++
 		s.stats.PhysicalSize += pbf.Size
@@ -592,7 +591,7 @@ func (s *CurrentBlobFileSet) Init(bve *BulkVersionEdit, h BlobRewriteHeuristic) 
 				if !ok {
 					panic(errors.AssertionFailedf("pebble: referenced blob file %d not found", ref.FileID))
 				}
-				cbf.references[table] = struct{}{}
+				cbf.references[table.TableNum] = struct{}{}
 				cbf.referencedValueSize += ref.ValueSize
 				s.stats.ReferencedValueSize += ref.ValueSize
 				s.stats.ReferencesCount++
@@ -725,7 +724,7 @@ func (s *CurrentBlobFileSet) ApplyAndUpdateVersionEdit(ve *VersionEdit) error {
 		}
 
 		blobFileID := m.FileID
-		cbf := &currentBlobFile{references: make(map[*TableMetadata]struct{})}
+		cbf := &currentBlobFile{references: make(map[base.TableNum]struct{})}
 		cbf.metadata = BlobFileMetadata{FileID: blobFileID, Physical: m.Physical}
 		s.files[blobFileID] = cbf
 		s.stats.Count++
@@ -743,7 +742,7 @@ func (s *CurrentBlobFileSet) ApplyAndUpdateVersionEdit(ve *VersionEdit) error {
 			if !ok {
 				return errors.AssertionFailedf("pebble: referenced blob file %d not found", ref.FileID)
 			}
-			cbf.references[e.Meta] = struct{}{}
+			cbf.references[e.Meta.TableNum] = struct{}{}
 			cbf.referencedValueSize += ref.ValueSize
 			s.stats.ReferencedValueSize += ref.ValueSize
 			s.stats.ReferencesCount++
@@ -766,7 +765,7 @@ func (s *CurrentBlobFileSet) ApplyAndUpdateVersionEdit(ve *VersionEdit) error {
 					return errors.AssertionFailedf("pebble: referenced value size %d for blob file %s is greater than the referenced value size %d",
 						ref.ValueSize, cbf.metadata.FileID, cbf.referencedValueSize)
 				}
-				if _, ok := cbf.references[meta]; !ok {
+				if _, ok := cbf.references[meta.TableNum]; !ok {
 					return errors.AssertionFailedf("pebble: deleted table %s's reference to blob file %s not known",
 						meta.TableNum, ref.FileID)
 				}
@@ -787,7 +786,7 @@ func (s *CurrentBlobFileSet) ApplyAndUpdateVersionEdit(ve *VersionEdit) error {
 				continue
 			}
 			// Remove the reference of this table to this blob file.
-			delete(cbf.references, meta)
+			delete(cbf.references, meta.TableNum)
 
 			// If there are no more references to the blob file, remove it from
 			// the set and add the removal of the blob file to the version edit.
@@ -869,28 +868,13 @@ func (s *CurrentBlobFileSet) ApplyAndUpdateVersionEdit(ve *VersionEdit) error {
 // ReplacementCandidate returns the next blob file that should be rewritten. If
 // there are no candidates, the second return value is false.  Successive calls
 // to ReplacementCandidate may (but are not guaranteed to) return the same blob
-// file until the blob file is replaced.
+// file until the blob file is replaced..
 func (s *CurrentBlobFileSet) ReplacementCandidate() (BlobFileMetadata, bool) {
 	s.moveAgedBlobFilesToCandidatesHeap(s.rewrite.heuristic.CurrentTime())
 	if len(s.rewrite.candidates.items) == 0 {
 		return BlobFileMetadata{}, false
 	}
 	return s.rewrite.candidates.items[0].metadata, true
-}
-
-// ReferencingTables returns a slice containing the set of tables that reference
-// the blob file with the provided file ID. The returned slice is sorted by
-// table number.
-func (s *CurrentBlobFileSet) ReferencingTables(fileID base.BlobFileID) []*TableMetadata {
-	cbf, ok := s.files[fileID]
-	if !ok {
-		return nil
-	}
-	tables := slices.Collect(maps.Keys(cbf.references))
-	slices.SortFunc(tables, func(a, b *TableMetadata) int {
-		return stdcmp.Compare(a.TableNum, b.TableNum)
-	})
-	return tables
 }
 
 // moveAgedBlobFilesToCandidatesHeap moves blob files from the recentlyCreated

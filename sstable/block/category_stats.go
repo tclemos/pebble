@@ -15,6 +15,7 @@ import (
 
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/redact"
+	"github.com/cockroachdb/pebble/sstable/block/blockkind"
 )
 
 // Category is a user-understandable string, where stats are aggregated for
@@ -33,8 +34,9 @@ const CategoryUnknown Category = 0
 // number of categories that can be registered.
 const CategoryMax = 30
 
-// shardPadding pads each shard to 64 bytes so they don't share a cache line.
-const shardPadding = 64 - unsafe.Sizeof(CategoryStatsShard{})
+// shardPadding pads each shard to a cache line boundary so they don't share a cache line.
+// The CategoryStatsShard struct is now larger due to detailed metrics, so we use 512 bytes.
+const shardPadding = 512 - unsafe.Sizeof(CategoryStatsShard{})
 
 // paddedCategoryStatsShard is a single shard of a category's statistics.
 type paddedCategoryStatsShard struct {
@@ -163,6 +165,21 @@ type CategoryStats struct {
 	// BlockReadDuration is the total duration to read the bytes not in the
 	// cache, i.e., BlockBytes-BlockBytesInCache.
 	BlockReadDuration time.Duration
+	
+	// High-resolution instrumentation for cache performance analysis
+	
+	// CacheHitsByBlockKind tracks cache hits by block type
+	CacheHitsByBlockKind [blockkind.NumKinds]uint64
+	// CacheMissesByBlockKind tracks cache misses by block type  
+	CacheMissesByBlockKind [blockkind.NumKinds]uint64
+	// CacheHitsByLevel tracks cache hits by LSM level (0-6)
+	CacheHitsByLevel [7]uint64
+	// CacheMissesByLevel tracks cache misses by LSM level (0-6)
+	CacheMissesByLevel [7]uint64
+	// ReadLatencyByLevel tracks cumulative read time per LSM level
+	ReadLatencyByLevel [7]time.Duration
+	// BlocksReadByLevel tracks number of blocks read per LSM level
+	BlocksReadByLevel [7]uint64
 }
 
 func (s *CategoryStats) aggregate(
@@ -171,6 +188,138 @@ func (s *CategoryStats) aggregate(
 	s.BlockBytes += blockBytes
 	s.BlockBytesInCache += blockBytesInCache
 	s.BlockReadDuration += blockReadDuration
+}
+
+// aggregateDetailed adds detailed instrumentation metrics to the stats.
+func (s *CategoryStats) aggregateDetailed(
+	blockBytes, blockBytesInCache uint64, blockReadDuration time.Duration,
+	blockKind blockkind.Kind, level int, cacheHit bool,
+) {
+	// Aggregate basic stats
+	s.aggregate(blockBytes, blockBytesInCache, blockReadDuration)
+	
+	// Track cache hits/misses by block kind
+	if int(blockKind) < len(s.CacheHitsByBlockKind) {
+		if cacheHit {
+			s.CacheHitsByBlockKind[blockKind]++
+		} else {
+			s.CacheMissesByBlockKind[blockKind]++
+		}
+	}
+	
+	// Track cache hits/misses by level (0-6)
+	if level >= 0 && level < len(s.CacheHitsByLevel) {
+		if cacheHit {
+			s.CacheHitsByLevel[level]++
+		} else {
+			s.CacheMissesByLevel[level]++
+		}
+		s.ReadLatencyByLevel[level] += blockReadDuration
+		s.BlocksReadByLevel[level]++
+	}
+}
+
+// aggregateFrom combines stats from another CategoryStats instance.
+func (s *CategoryStats) aggregateFrom(other *CategoryStats) {
+	s.BlockBytes += other.BlockBytes
+	s.BlockBytesInCache += other.BlockBytesInCache
+	s.BlockReadDuration += other.BlockReadDuration
+	
+	// Aggregate detailed metrics
+	for i := range s.CacheHitsByBlockKind {
+		s.CacheHitsByBlockKind[i] += other.CacheHitsByBlockKind[i]
+		s.CacheMissesByBlockKind[i] += other.CacheMissesByBlockKind[i]
+	}
+	
+	for i := range s.CacheHitsByLevel {
+		s.CacheHitsByLevel[i] += other.CacheHitsByLevel[i]
+		s.CacheMissesByLevel[i] += other.CacheMissesByLevel[i]
+		s.ReadLatencyByLevel[i] += other.ReadLatencyByLevel[i]
+		s.BlocksReadByLevel[i] += other.BlocksReadByLevel[i]
+	}
+}
+
+// Helper methods for analyzing detailed metrics
+
+// CacheHitRate returns the overall cache hit rate as a percentage.
+func (s *CategoryStats) CacheHitRate() float64 {
+	totalHits := uint64(0)
+	totalMisses := uint64(0)
+	
+	for i := range s.CacheHitsByBlockKind {
+		totalHits += s.CacheHitsByBlockKind[i]
+		totalMisses += s.CacheMissesByBlockKind[i]
+	}
+	
+	total := totalHits + totalMisses
+	if total == 0 {
+		return 0.0
+	}
+	return float64(totalHits) / float64(total) * 100.0
+}
+
+// CacheHitRateByBlockKind returns the cache hit rate for a specific block kind.
+func (s *CategoryStats) CacheHitRateByBlockKind(kind blockkind.Kind) float64 {
+	if int(kind) >= len(s.CacheHitsByBlockKind) {
+		return 0.0
+	}
+	
+	hits := s.CacheHitsByBlockKind[kind]
+	misses := s.CacheMissesByBlockKind[kind]
+	total := hits + misses
+	
+	if total == 0 {
+		return 0.0
+	}
+	return float64(hits) / float64(total) * 100.0
+}
+
+// CacheHitRateByLevel returns the cache hit rate for a specific LSM level.
+func (s *CategoryStats) CacheHitRateByLevel(level int) float64 {
+	if level < 0 || level >= len(s.CacheHitsByLevel) {
+		return 0.0
+	}
+	
+	hits := s.CacheHitsByLevel[level]
+	misses := s.CacheMissesByLevel[level]
+	total := hits + misses
+	
+	if total == 0 {
+		return 0.0
+	}
+	return float64(hits) / float64(total) * 100.0
+}
+
+// AverageReadLatencyByLevel returns the average read latency for a specific LSM level.
+func (s *CategoryStats) AverageReadLatencyByLevel(level int) time.Duration {
+	if level < 0 || level >= len(s.ReadLatencyByLevel) {
+		return 0
+	}
+	
+	blocks := s.BlocksReadByLevel[level]
+	if blocks == 0 {
+		return 0
+	}
+	
+	return s.ReadLatencyByLevel[level] / time.Duration(blocks)
+}
+
+// TotalCacheHits returns the total number of cache hits across all block kinds and levels.
+func (s *CategoryStats) TotalCacheHits() uint64 {
+	total := uint64(0)
+	for i := range s.CacheHitsByBlockKind {
+		total += s.CacheHitsByBlockKind[i]
+	}
+	return total
+}
+
+// TotalCacheMisses returns the total number of cache misses across all block kinds and levels.
+func (s *CategoryStats) TotalCacheMisses() uint64 {
+	total := uint64(0)
+	for i := range s.CacheMissesByBlockKind {
+		total += s.CacheMissesByBlockKind[i]
+	}
+	return total
 }
 
 // CategoryStatsAggregate is the aggregate for the given category.
@@ -208,6 +357,16 @@ func (c *CategoryStatsShard) Accumulate(
 	c.mu.Unlock()
 }
 
+// AccumulateDetailed accumulates detailed instrumentation metrics.
+func (c *CategoryStatsShard) AccumulateDetailed(
+	blockBytes, blockBytesInCache uint64, blockReadDuration time.Duration,
+	blockKind blockkind.Kind, level int, cacheHit bool,
+) {
+	c.mu.Lock()
+	c.mu.stats.aggregateDetailed(blockBytes, blockBytesInCache, blockReadDuration, blockKind, level, cacheHit)
+	c.mu.Unlock()
+}
+
 // CategoryStatsCollector collects and aggregates the stats per category.
 type CategoryStatsCollector struct {
 	// mu protects additions to statsMap.
@@ -232,7 +391,7 @@ func (s *shardedCategoryStats) getStats() CategoryStatsAggregate {
 	}
 	for i := range s.shards {
 		s.shards[i].mu.Lock()
-		agg.CategoryStats.aggregate(s.shards[i].mu.stats.BlockBytes, s.shards[i].mu.stats.BlockBytesInCache, s.shards[i].mu.stats.BlockReadDuration)
+		agg.CategoryStats.aggregateFrom(&s.shards[i].mu.stats)
 		s.shards[i].mu.Unlock()
 	}
 	return agg

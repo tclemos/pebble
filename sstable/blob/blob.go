@@ -162,21 +162,19 @@ func (w *FileWriter) AddValue(v []byte) Handle {
 	}
 }
 
-// beginNewVirtualBlock adds a virtual block mapping to the current physical
+// BeginNewVirtualBlock adds a virtual block mapping to the current physical
 // block and valueID offset within the block.
 //
-// When a blob file is rewritten, beginNewVirtualBlock is called for each block
+// When a blob file is rewritten, BeginNewVirtualBlock is called for each block
 // in the original blob file before adding any of the block's extant values.
-// beginNewVirtualBlock records a mapping from the original block ID (referred
+// BeginNewVirtualBlock records a mapping from the original block ID (referred
 // to as a virtual block) to a tuple of the physical block index and the offset
 // of the BlockValueIDs within the new physical block.
 //
 // This mapping is used by readers to determine which physical block contains a
 // given virtual block, and how to map BlockValueIDs from the given virtual
 // block to BlockValueIDs in the physical block.
-func (w *FileWriter) beginNewVirtualBlock(vblockID BlockID) {
-	// TODO(jackson): Update tests to use the blob.FileRewriter type and move this
-	// into the FileRewriter.
+func (w *FileWriter) BeginNewVirtualBlock(vblockID BlockID) {
 	w.indexEncoder.AddVirtualBlockMapping(vblockID, int(w.stats.BlockCount),
 		BlockValueID(w.valuesEncoder.Count()))
 }
@@ -285,7 +283,7 @@ func (w *FileWriter) Close() (FileWriterStats, error) {
 	{
 		indexBlock := w.indexEncoder.Finish()
 		var compressedBuf []byte
-		pb := block.CopyAndChecksum(&compressedBuf, indexBlock, blockkind.Metadata, &w.compressor, &w.checksummer)
+		pb := block.CompressAndChecksum(&compressedBuf, indexBlock, blockkind.Metadata, block.NoopCompressor, &w.checksummer)
 		if _, w.err = pb.WriteTo(w.w); w.err != nil {
 			err = w.err
 			if w.w != nil {

@@ -44,10 +44,6 @@ testmsan: testflags += -msan -timeout 20m
 testmsan: TAGS += slowbuild
 testmsan: test
 
-.PHONY: testnocgo
-testnocgo:
-	CGO_ENABLED=0 ${GO} test -tags '$(TAGS)' ${testflags} -run ${TESTS} ${PKG}
-
 .PHONY: testobjiotracing
 testobjiotracing:
 	${GO} test -tags '$(TAGS) pebble_obj_io_tracing' ${testflags} -run ${TESTS} ./objstorage/objstorageprovider/objiotracing
@@ -78,7 +74,7 @@ crossversion-meta:
 
 .PHONY: stress-crossversion
 stress-crossversion:
-	STRESS=1 ./scripts/run-crossversion-meta.sh crl-release-24.1 crl-release-24.3 crl-release-25.1 crl-release-25.2 crl-release-25.3 master
+	STRESS=1 ./scripts/run-crossversion-meta.sh crl-release-24.1 crl-release-24.3 crl-release-25.1 crl-release-25.2 master
 
 .PHONY: test-s390x-qemu
 test-s390x-qemu: TAGS += slowbuild

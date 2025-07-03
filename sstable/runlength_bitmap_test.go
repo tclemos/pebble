@@ -43,7 +43,7 @@ func TestRunLengthBitmap(t *testing.T) {
 			// Validate that decoding the bitmap and re-encoding it yields the
 			// same encoding.
 			enc.Init()
-			for i := range IterSetBitsInRunLengthBitmap(encodedBuf) {
+			for i := range iterSetBitsInRunLengthBitmap(encodedBuf) {
 				enc.Set(i)
 			}
 			roundtripBuf = enc.FinishAndAppend(roundtripBuf[:0])
@@ -87,7 +87,7 @@ func TestRunLengthBitmap_Randomized(t *testing.T) {
 		encoded := enc.FinishAndAppend(nil)
 		enc = BitmapRunLengthEncoder{}
 		enc.Init()
-		for i := range IterSetBitsInRunLengthBitmap(encoded) {
+		for i := range iterSetBitsInRunLengthBitmap(encoded) {
 			enc.Set(i)
 		}
 		reencoded := enc.FinishAndAppend(nil)

@@ -6,11 +6,9 @@ package pebble
 
 import (
 	"bytes"
-	stdcmp "cmp"
 	"context"
 	"fmt"
 	"iter"
-	"maps"
 	"math"
 	"runtime/pprof"
 	"slices"
@@ -153,7 +151,6 @@ const (
 	compactionKindTombstoneDensity
 	compactionKindRewrite
 	compactionKindIngestedFlushable
-	compactionKindBlobFileRewrite
 )
 
 func (k compactionKind) String() string {
@@ -178,8 +175,6 @@ func (k compactionKind) String() string {
 		return "ingested-flushable"
 	case compactionKindCopy:
 		return "copy"
-	case compactionKindBlobFileRewrite:
-		return "blob-file-rewrite"
 	}
 	return "?"
 }
@@ -333,8 +328,6 @@ type tableCompaction struct {
 
 	tableFormat   sstable.TableFormat
 	objCreateOpts objstorage.CreateOptions
-
-	annotations []string
 }
 
 // Assert that tableCompaction implements the compaction interface.
@@ -417,9 +410,8 @@ func (c *tableCompaction) IsFlush() bool                      { return len(c.flu
 func (c *tableCompaction) Info() compactionInfo {
 	info := compactionInfo{
 		versionEditApplied: c.versionEditApplied,
-		kind:               c.kind,
 		inputs:             c.inputs,
-		bounds:             &c.bounds,
+		bounds:             c.bounds,
 		outputLevel:        -1,
 	}
 	if c.outputLevel != nil {
@@ -1782,8 +1774,7 @@ func (d *DB) flush1() (bytesFlushed uint64, err error) {
 				// doing a [c,d) excise at the same time as this compaction, we will have
 				// to error out the whole compaction as we can't guarantee it hasn't/won't
 				// write a file overlapping with the excise span.
-				bounds := c2.Bounds()
-				if bounds != nil && bounds.Overlaps(d.cmp, &exciseBounds) {
+				if c2.Bounds().Overlaps(d.cmp, &exciseBounds) {
 					c2.Cancel()
 				}
 			}
@@ -1820,7 +1811,8 @@ func (d *DB) flush1() (bytesFlushed uint64, err error) {
 
 	d.clearCompactingState(c, err != nil)
 	delete(d.mu.compact.inProgress, c)
-	d.mu.versions.incrementCompactions(c.kind, c.extraLevels, c.metrics.bytesWritten.Load(), err)
+	d.mu.versions.incrementCompactions(c.kind, c.extraLevels, c.metrics.picker,
+		c.metrics.bytesWritten.Load(), err)
 
 	var flushed flushableList
 	if err == nil {
@@ -2685,7 +2677,6 @@ func (d *DB) compact1(jobID JobID, c *tableCompaction) (err error) {
 
 	ve, stats, err := d.runCompaction(jobID, c)
 
-	info.Annotations = append(info.Annotations, c.annotations...)
 	info.Duration = d.timeNow().Sub(startTime)
 	if err == nil {
 		validateVersionEdit(ve, d.opts.Comparer.ValidateKey, d.opts.Comparer.FormatKey, d.opts.Logger)
@@ -2730,7 +2721,8 @@ func (d *DB) compact1(jobID JobID, c *tableCompaction) (err error) {
 	// NB: clearing compacting state must occur before updating the read state;
 	// L0Sublevels initialization depends on it.
 	d.clearCompactingState(c, err != nil)
-	d.mu.versions.incrementCompactions(c.kind, c.extraLevels, c.metrics.bytesWritten.Load(), err)
+	d.mu.versions.incrementCompactions(c.kind, c.extraLevels, c.metrics.picker,
+		c.metrics.bytesWritten.Load(), err)
 	d.mu.versions.incrementCompactionBytes(-c.metrics.bytesWritten.Load())
 
 	info.TotalDuration = d.timeNow().Sub(c.metrics.beganAt)
@@ -3119,13 +3111,6 @@ func (d *DB) runDeleteOnlyCompaction(
 		}
 		return false
 	})
-	sort.Slice(ve.NewTables, func(i, j int) bool {
-		return ve.NewTables[i].Meta.TableNum < ve.NewTables[j].Meta.TableNum
-	})
-	deletedTableEntries := slices.Collect(maps.Keys(ve.DeletedTables))
-	slices.SortFunc(deletedTableEntries, func(a, b manifest.DeletedTableEntry) int {
-		return stdcmp.Compare(a.FileNum, b.FileNum)
-	})
 	// Remove any entries from CreatedBackingTables that are not used in any
 	// NewFiles.
 	usedBackingFiles := make(map[base.DiskFileNum]struct{})
@@ -3138,22 +3123,6 @@ func (d *DB) runDeleteOnlyCompaction(
 		_, used := usedBackingFiles[b.DiskFileNum]
 		return !used
 	})
-
-	// Iterate through the deleted tables and new tables to annotate excised tables.
-	// If a new table is virtual and the base.DiskFileNum is the same as a deleted table, then
-	// our deleted table was excised.
-	for _, table := range deletedTableEntries {
-		for _, newEntry := range ve.NewTables {
-			if newEntry.Meta.Virtual &&
-				newEntry.Meta.TableBacking.DiskFileNum == ve.DeletedTables[table].TableBacking.DiskFileNum {
-				c.annotations = append(c.annotations,
-					fmt.Sprintf("(excised: %s)", ve.DeletedTables[table].TableNum))
-				break
-			}
-		}
-
-	}
-
 	// Refresh the disk available statistic whenever a compaction/flush
 	// completes, before re-acquiring the mutex.
 	d.calculateDiskAvailableBytes()
@@ -3555,8 +3524,7 @@ func (c *tableCompaction) makeVersionEdit(result compact.Result) (*manifest.Vers
 func (d *DB) newCompactionOutputTable(
 	jobID JobID, c *tableCompaction, writerOpts sstable.WriterOptions,
 ) (objstorage.ObjectMetadata, sstable.RawWriter, error) {
-	writable, objMeta, err := d.newCompactionOutputObj(
-		base.FileTypeTable, c.kind, c.outputLevel.level, &c.metrics.bytesWritten, c.objCreateOpts)
+	writable, objMeta, err := d.newCompactionOutputObj(c, base.FileTypeTable)
 	if err != nil {
 		return objstorage.ObjectMetadata{}, nil, err
 	}
@@ -3579,19 +3547,15 @@ func (d *DB) newCompactionOutputTable(
 // newCompactionOutputBlob creates an object for a new blob produced by a
 // compaction or flush.
 func (d *DB) newCompactionOutputBlob(
-	jobID JobID,
-	kind compactionKind,
-	outputLevel int,
-	bytesWritten *atomic.Int64,
-	opts objstorage.CreateOptions,
+	jobID JobID, c *tableCompaction,
 ) (objstorage.Writable, objstorage.ObjectMetadata, error) {
-	writable, objMeta, err := d.newCompactionOutputObj(base.FileTypeBlob, kind, outputLevel, bytesWritten, opts)
+	writable, objMeta, err := d.newCompactionOutputObj(c, base.FileTypeBlob)
 	if err != nil {
 		return nil, objstorage.ObjectMetadata{}, err
 	}
 	d.opts.EventListener.BlobFileCreated(BlobFileCreateInfo{
 		JobID:   int(jobID),
-		Reason:  kind.compactingOrFlushing(),
+		Reason:  c.kind.compactingOrFlushing(),
 		Path:    d.objProvider.Path(objMeta),
 		FileNum: objMeta.DiskFileNum,
 	})
@@ -3600,34 +3564,30 @@ func (d *DB) newCompactionOutputBlob(
 
 // newCompactionOutputObj creates an object produced by a compaction or flush.
 func (d *DB) newCompactionOutputObj(
-	typ base.FileType,
-	kind compactionKind,
-	outputLevel int,
-	bytesWritten *atomic.Int64,
-	opts objstorage.CreateOptions,
+	c *tableCompaction, typ base.FileType,
 ) (objstorage.Writable, objstorage.ObjectMetadata, error) {
 	diskFileNum := d.mu.versions.getNextDiskFileNum()
 	ctx := context.TODO()
 
 	if objiotracing.Enabled {
-		ctx = objiotracing.WithLevel(ctx, outputLevel)
-		if kind == compactionKindFlush {
+		ctx = objiotracing.WithLevel(ctx, c.outputLevel.level)
+		if c.kind == compactionKindFlush {
 			ctx = objiotracing.WithReason(ctx, objiotracing.ForFlush)
 		} else {
 			ctx = objiotracing.WithReason(ctx, objiotracing.ForCompaction)
 		}
 	}
 
-	writable, objMeta, err := d.objProvider.Create(ctx, typ, diskFileNum, opts)
+	writable, objMeta, err := d.objProvider.Create(ctx, typ, diskFileNum, c.objCreateOpts)
 	if err != nil {
 		return nil, objstorage.ObjectMetadata{}, err
 	}
 
-	if kind != compactionKindFlush {
+	if c.kind != compactionKindFlush {
 		writable = &compactionWritable{
 			Writable: writable,
 			versions: d.mu.versions,
-			written:  bytesWritten,
+			written:  &c.metrics.bytesWritten,
 		}
 	}
 	return writable, objMeta, nil
@@ -3663,8 +3623,6 @@ func getDiskWriteCategoryForCompaction(opts *Options, kind compactionKind) vfs.D
 		return "sql-row-spill"
 	} else if kind == compactionKindFlush {
 		return "pebble-memtable-flush"
-	} else if kind == compactionKindBlobFileRewrite {
-		return "pebble-blob-file-rewrite"
 	} else {
 		return "pebble-compaction"
 	}

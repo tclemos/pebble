@@ -369,10 +369,16 @@ func (rh ReadHandle) Valid() bool {
 // The cache takes a reference on the Value and holds it until it is evicted and
 // no longer needed by other readers.
 func (rh ReadHandle) SetReadValue(v *Value) {
-	rh.entry.setReadValue(v)
+	if rh.entry != nil {
+		rh.entry.setReadValue(v)
+	}
+	// No-op if entry is nil (NoCache case)
 }
 
 // SetReadError specifies that the caller has encountered a read error.
 func (rh ReadHandle) SetReadError(err error) {
-	rh.entry.setReadError(err)
+	if rh.entry != nil {
+		rh.entry.setReadError(err)
+	}
+	// No-op if entry is nil (NoCache case)
 }

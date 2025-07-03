@@ -88,8 +88,6 @@ func newPebbleDB(dir string) DB {
 			MinimumSize:           512,
 			MaxBlobReferenceDepth: 10,
 			RewriteMinimumAge:     5 * time.Minute,
-			// TODO(jackson): Adjust the TargetGarbageRatio to allow blob file rewrites.
-			TargetGarbageRatio: 1.0, // Disabled.
 		}
 	}
 

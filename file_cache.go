@@ -148,7 +148,10 @@ func (c *FileCache) newHandle(
 	readerOpts sstable.ReaderOptions,
 	reportCorruptionFn func(any, error) error,
 ) *fileCacheHandle {
-	c.Ref()
+	// Special handling for NoFileCache - don't call Ref()
+	if !isNoFileCache(c) {
+		c.Ref()
+	}
 
 	t := &fileCacheHandle{
 		fileCache:        c,
@@ -185,7 +188,7 @@ func (h *fileCacheHandle) Close() error {
 	}
 
 	// EvictAll would panic if there are still outstanding references.
-	if err == nil {
+	if err == nil && !isNoFileCache(h.fileCache) {
 		keys := h.fileCache.c.EvictAll(func(key fileCacheKey) bool {
 			return key.handle == h
 		})
@@ -252,6 +255,8 @@ func (h *fileCacheHandle) openFile(
 func (h *fileCacheHandle) findOrCreateTable(
 	ctx context.Context, meta *manifest.TableMetadata,
 ) (genericcache.ValueRef[fileCacheKey, fileCacheValue], error) {
+	// For NoFileCache, we still use the cache interface but it will be a no-op
+	// The NoFileCache will have a nil underlying cache that doesn't actually cache
 	key := fileCacheKey{
 		handle:   h,
 		fileNum:  meta.TableBacking.DiskFileNum,
@@ -290,7 +295,10 @@ func (h *fileCacheHandle) Evict(fileNum base.DiskFileNum, fileType base.FileType
 			panic(fmt.Sprintf("pebble: evicting in-use file %s(%s): %v", fileNum, fileType, p))
 		}
 	}()
-	h.fileCache.c.Evict(fileCacheKey{handle: h, fileNum: fileNum, fileType: fileType})
+	// Only evict if not using NoFileCache
+	if !isNoFileCache(h.fileCache) {
+		h.fileCache.c.Evict(fileCacheKey{handle: h, fileNum: fileNum, fileType: fileType})
+	}
 	h.blockCacheHandle.EvictFile(fileNum)
 }
 
@@ -302,6 +310,17 @@ func (h *fileCacheHandle) SSTStatsCollector() *block.CategoryStatsCollector {
 // the global cache which is shared between multiple handles (stores). The
 // FilterMetrics are per-handle.
 func (h *fileCacheHandle) Metrics() (FileCacheMetrics, FilterMetrics) {
+	// For NoFileCache, return zero metrics
+	if isNoFileCache(h.fileCache) {
+		return FileCacheMetrics{
+			Size:          0,
+			TableCount:    0,
+			BlobFileCount: 0,
+			Hits:          0,
+			Misses:        0,
+		}, h.readerOpts.FilterMetricsTracker.Load()
+	}
+	
 	m := h.fileCache.c.Metrics()
 
 	// The generic cache maintains a count of entries, but it doesn't know which
@@ -419,6 +438,10 @@ type FileCache struct {
 // Ref adds a reference to the file cache. Once a file cache is constructed, the
 // cache only remains valid if there is at least one reference to it.
 func (c *FileCache) Ref() {
+	// NoFileCache doesn't need reference counting
+	if isNoFileCache(c) {
+		return
+	}
 	v := c.refs.Add(1)
 	// We don't want the reference count to ever go from 0 -> 1,
 	// cause a reference count of 0 implies that we've closed the cache.
@@ -429,6 +452,10 @@ func (c *FileCache) Ref() {
 
 // Unref removes a reference to the file cache.
 func (c *FileCache) Unref() {
+	// NoFileCache doesn't need reference counting
+	if isNoFileCache(c) {
+		return
+	}
 	v := c.refs.Add(-1)
 	switch {
 	case v < 0:
@@ -444,7 +471,8 @@ func (c *FileCache) Unref() {
 // reference to the file cache.
 func NewFileCache(numShards int, size int) *FileCache {
 	if size == 0 {
-		panic("pebble: cannot create a file cache of size 0")
+		// Return NoFileCache when size is 0 (similar to how block cache handles this)
+		return NoFileCache
 	} else if numShards == 0 {
 		panic("pebble: cannot create a file cache with 0 shards")
 	}
@@ -1067,3 +1095,49 @@ const (
 	iterRangeDeletions
 	iterRangeKeys
 )
+
+// NoFileCache is a singleton no-op file cache implementation for when file caching is disabled.
+// It follows the same pattern as NoCache in Pebble.
+var NoFileCache = newNoFileCache()
+
+// newNoFileCache creates a disabled file cache instance that performs no caching operations.
+func newNoFileCache() *FileCache {
+	c := &FileCache{}
+	// Set refs to 1 to prevent cleanup, similar to a singleton
+	c.refs.Store(1)
+	
+	// Initialize the underlying cache with capacity 0 to disable caching
+	// This will create readers on each access but not cache them
+	c.c.Init(0, 1, 
+		// initFn - called for each file access (no caching)
+		func(ctx context.Context, key fileCacheKey, vRef genericcache.ValueRef[fileCacheKey, fileCacheValue]) error {
+			v := vRef.Value()
+			handle := key.handle
+			v.readerProvider.init(c, key)
+			v.closeHook = func() {
+				vRef.Unref()
+				handle.iterCount.Add(-1)
+			}
+			reader, objMeta, err := handle.openFile(ctx, key.fileNum, key.fileType)
+			if err != nil {
+				return errors.Wrapf(err, "pebble: backing file %s error", redact.Safe(key.fileNum))
+			}
+			v.reader = reader
+			v.isShared = objMeta.IsShared()
+			// Don't increment counters for NoFileCache
+			return nil
+		},
+		// releaseFn - called when readers are released
+		func(v *fileCacheValue) {
+			if v.reader != nil {
+				_ = v.reader.Close()
+			}
+		})
+	
+	return c
+}
+
+// isNoFileCache checks if a file cache is the disabled NoFileCache instance.
+func isNoFileCache(c *FileCache) bool {
+	return c == NoFileCache
+}

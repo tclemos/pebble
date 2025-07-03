@@ -387,6 +387,18 @@ func (env *ReadEnv) BlockServedFromCache(blockLength uint64) {
 	}
 }
 
+// BlockServedFromCacheDetailed updates the stats when a block was found in the cache,
+// with detailed instrumentation including block kind and LSM level.
+func (env *ReadEnv) BlockServedFromCacheDetailed(blockLength uint64, blockKind Kind, level int) {
+	if env.Stats != nil {
+		env.Stats.BlockBytes += blockLength
+		env.Stats.BlockBytesInCache += blockLength
+	}
+	if env.IterStats != nil {
+		env.IterStats.AccumulateDetailed(blockLength, blockLength, 0, blockKind, level, true /* cacheHit */)
+	}
+}
+
 // BlockRead updates the stats when a block had to be read.
 func (env *ReadEnv) BlockRead(blockLength uint64, readDuration time.Duration) {
 	if env.Stats != nil {
@@ -395,6 +407,18 @@ func (env *ReadEnv) BlockRead(blockLength uint64, readDuration time.Duration) {
 	}
 	if env.IterStats != nil {
 		env.IterStats.Accumulate(blockLength, 0, readDuration)
+	}
+}
+
+// BlockReadDetailed updates the stats when a block had to be read,
+// with detailed instrumentation including block kind and LSM level.
+func (env *ReadEnv) BlockReadDetailed(blockLength uint64, readDuration time.Duration, blockKind Kind, level int) {
+	if env.Stats != nil {
+		env.Stats.BlockBytes += blockLength
+		env.Stats.BlockReadDuration += readDuration
+	}
+	if env.IterStats != nil {
+		env.IterStats.AccumulateDetailed(blockLength, 0, readDuration, blockKind, level, false /* cacheHit */)
 	}
 }
 

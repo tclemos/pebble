@@ -2630,6 +2630,15 @@ func (d *DB) maybeInduceWriteStall(b *Batch) {
 		for i := range d.mu.mem.queue {
 			size += d.mu.mem.queue[i].totalBytes()
 		}
+		// If ElevateWriteStallThresholdForFailover is true, we give an
+		// unlimited memory budget for memtables. This is simpler than trying to
+		// configure an explicit value, given that memory resources can vary.
+		// When using WAL failover in CockroachDB, an OOM risk is worth
+		// tolerating for workloads that have a strict latency SLO. Also, an
+		// unlimited budget here does not mean that the disk stall in the
+		// primary will go unnoticed until the OOM -- CockroachDB is monitoring
+		// disk stalls, and we expect it to fail the node after ~60s if the
+		// primary is stalled.
 		if size >= uint64(d.opts.MemTableStopWritesThreshold)*d.opts.MemTableSize &&
 			!d.mu.log.manager.ElevateWriteStallThresholdForFailover() {
 			// We have filled up the current memtable, but already queued memtables
@@ -2851,7 +2860,7 @@ func (d *DB) getEarliestUnflushedSeqNumLocked() base.SeqNum {
 	return seqNum
 }
 
-func (d *DB) getInProgressCompactionInfoLocked(finishing compaction) (rv []compactionInfo) {
+func (d *DB) getInProgressCompactionInfoLocked(finishing *tableCompaction) (rv []compactionInfo) {
 	for c := range d.mu.compact.inProgress {
 		if !c.IsFlush() && (finishing == nil || c != finishing) {
 			rv = append(rv, c.Info())
@@ -2879,7 +2888,7 @@ func inProgressL0Compactions(inProgress []compactionInfo) []manifest.L0Compactio
 			continue
 		}
 		compactions = append(compactions, manifest.L0Compaction{
-			Bounds:    *info.bounds,
+			Bounds:    info.bounds,
 			IsIntraL0: info.outputLevel == 0,
 		})
 	}

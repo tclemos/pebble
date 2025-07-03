@@ -178,6 +178,13 @@ func (c *Cache) Unref() {
 }
 
 func (c *Cache) NewHandle() *Handle {
+	// Special handling for NoCache - don't call Ref() or allocate ID
+	if isNoCache(c) {
+		return &Handle{
+			cache: c,
+			id:    0, // Special ID for no-cache handle
+		}
+	}
 	c.Ref()
 	id := handleID(c.idAlloc.Add(1))
 	return &Handle{
@@ -190,6 +197,10 @@ func (c *Cache) NewHandle() *Handle {
 // by N bytes, without actually consuming any memory. The returned closure
 // should be invoked to release the reservation.
 func (c *Cache) Reserve(n int) func() {
+	// NoCache doesn't reserve anything - return a no-op function
+	if isNoCache(c) {
+		return func() {}
+	}
 	// Round-up the per-shard reservation. Most reservations should be large, so
 	// this probably doesn't matter in practice.
 	shardN := (n + len(c.shards) - 1) / len(c.shards)
@@ -209,6 +220,15 @@ func (c *Cache) Reserve(n int) func() {
 
 // Metrics returns the metrics for the cache.
 func (c *Cache) Metrics() Metrics {
+	// NoCache returns zero metrics
+	if isNoCache(c) {
+		return Metrics{
+			Size:   0,
+			Count:  0,
+			Hits:   0,
+			Misses: 0,
+		}
+	}
 	var m Metrics
 	for i := range c.shards {
 		s := &c.shards[i]
@@ -229,6 +249,10 @@ func (c *Cache) MaxSize() int64 {
 
 // Size returns the current space used by the cache.
 func (c *Cache) Size() int64 {
+	// NoCache uses no space
+	if isNoCache(c) {
+		return 0
+	}
 	var size int64
 	for i := range c.shards {
 		size += c.shards[i].Size()
@@ -237,6 +261,9 @@ func (c *Cache) Size() int64 {
 }
 
 func (c *Cache) getShard(k key) *shard {
+	if isNoCache(c) {
+		panic("getShard called on NoCache - this should not happen")
+	}
 	idx := k.shardIdx(len(c.shards))
 	return &c.shards[idx]
 }
@@ -262,6 +289,10 @@ func (c *Handle) Cache() *Cache {
 // Get retrieves the cache value for the specified file and offset, returning
 // nil if no value is present.
 func (c *Handle) Get(fileNum base.DiskFileNum, offset uint64) *Value {
+	// Check if this is a NoCache handle - always return cache miss
+	if isNoCache(c.cache) {
+		return nil
+	}
 	k := makeKey(c.id, fileNum, offset)
 	cv, re := c.cache.getShard(k).getWithMaybeReadEntry(k, false /* desireReadEntry */)
 	if invariants.Enabled && re != nil {
@@ -295,6 +326,10 @@ func (c *Handle) Get(fileNum base.DiskFileNum, offset uint64) *Value {
 func (c *Handle) GetWithReadHandle(
 	ctx context.Context, fileNum base.DiskFileNum, offset uint64,
 ) (cv *Value, rh ReadHandle, errorDuration time.Duration, cacheHit bool, err error) {
+	// Check if this is a NoCache handle - always return cache miss with empty ReadHandle
+	if isNoCache(c.cache) {
+		return nil, ReadHandle{}, 0, false, nil
+	}
 	k := makeKey(c.id, fileNum, offset)
 	cv, re := c.cache.getShard(k).getWithMaybeReadEntry(k, true /* desireReadEntry */)
 	if cv != nil {
@@ -313,24 +348,61 @@ func (c *Handle) GetWithReadHandle(
 //
 // The cache takes a reference on the Value and holds it until it gets evicted.
 func (c *Handle) Set(fileNum base.DiskFileNum, offset uint64, value *Value) {
+	// Check if this is a NoCache handle - no-op
+	if isNoCache(c.cache) {
+		return
+	}
 	k := makeKey(c.id, fileNum, offset)
 	c.cache.getShard(k).set(k, value)
 }
 
 // Delete deletes the cached value for the specified file and offset.
 func (c *Handle) Delete(fileNum base.DiskFileNum, offset uint64) {
+	// Check if this is a NoCache handle - no-op
+	if isNoCache(c.cache) {
+		return
+	}
 	k := makeKey(c.id, fileNum, offset)
 	c.cache.getShard(k).delete(k)
 }
 
 // EvictFile evicts all cache values for the specified file.
 func (c *Handle) EvictFile(fileNum base.DiskFileNum) {
+	// Check if this is a NoCache handle - no-op
+	if isNoCache(c.cache) {
+		return
+	}
 	for i := range c.cache.shards {
 		c.cache.shards[i].evictFile(c.id, fileNum)
 	}
 }
 
 func (c *Handle) Close() {
+	// Check if this is a NoCache handle - no-op
+	if isNoCache(c.cache) {
+		return
+	}
 	c.cache.Unref()
 	*c = Handle{}
 }
+
+// NoCache is a singleton no-op cache implementation for when caching is disabled.
+// It follows the same pattern as NoFilterPolicy in Pebble.
+var NoCache = newNoCache()
+
+// newNoCache creates a disabled cache instance that performs no caching operations.
+func newNoCache() *Cache {
+	c := &Cache{
+		maxSize: 0,
+		shards:  nil, // No shards for disabled cache
+	}
+	// Set refs to 1 to prevent cleanup, similar to a singleton
+	c.refs.Store(1)
+	return c
+}
+
+// isNoCache checks if a cache is the disabled NoCache instance.
+func isNoCache(c *Cache) bool {
+	return c == NoCache
+}
+

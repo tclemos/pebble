@@ -93,13 +93,9 @@ type compactionInfo struct {
 	// been committed. The compaction may still be in-progress deleting newly
 	// obsolete files.
 	versionEditApplied bool
-	// kind indicates the kind of compaction.
-	kind        compactionKind
-	inputs      []compactionLevel
-	outputLevel int
-	// bounds may be nil if the compaction does not involve sstables
-	// (specifically, a blob file rewrite).
-	bounds *base.UserKeyBounds
+	inputs             []compactionLevel
+	outputLevel        int
+	bounds             base.UserKeyBounds
 }
 
 func (info compactionInfo) String() string {
@@ -527,26 +523,29 @@ func (pc *pickedTableCompaction) growL0ForBase(cmp base.Compare, maxExpandedByte
 			panic(fmt.Sprintf("pc.startLevel.level is %d, expected 0", pc.startLevel.level))
 		}
 	}
-
-	if pc.outputLevel.files.Empty() {
-		// If there are no overlapping fields in the output level, we do not
-		// attempt to expand the compaction to encourage move compactions.
-		return false
-	}
-
 	smallestBaseKey := base.InvalidInternalKey
 	largestBaseKey := base.InvalidInternalKey
-	// NB: We use Reslice to access the underlying level's files, but
-	// we discard the returned slice. The pc.outputLevel.files slice
-	// is not modified.
-	_ = pc.outputLevel.files.Reslice(func(start, end *manifest.LevelIterator) {
-		if sm := start.Prev(); sm != nil {
+	if pc.outputLevel.files.Empty() {
+		baseIter := pc.version.Levels[pc.outputLevel.level].Iter()
+		if sm := baseIter.SeekLT(cmp, pc.bounds.Start); sm != nil {
 			smallestBaseKey = sm.Largest()
 		}
-		if la := end.Next(); la != nil {
+		if la := baseIter.SeekGE(cmp, pc.bounds.End.Key); la != nil {
 			largestBaseKey = la.Smallest()
 		}
-	})
+	} else {
+		// NB: We use Reslice to access the underlying level's files, but
+		// we discard the returned slice. The pc.outputLevel.files slice
+		// is not modified.
+		_ = pc.outputLevel.files.Reslice(func(start, end *manifest.LevelIterator) {
+			if sm := start.Prev(); sm != nil {
+				smallestBaseKey = sm.Largest()
+			}
+			if la := end.Next(); la != nil {
+				largestBaseKey = la.Smallest()
+			}
+		})
+	}
 	oldLcf := pc.lcf.Clone()
 	if !pc.l0Organizer.ExtendL0ForBaseCompactionTo(smallestBaseKey, largestBaseKey, pc.lcf) {
 		return false
@@ -1449,12 +1448,6 @@ func (p *compactionPickerByScore) pickAutoNonScore(env compactionEnv) (pc picked
 		return pc
 	}
 
-	// Check for blob file rewrites. These are low-priority compactions because
-	// they don't help us keep up with writes, just reclaim disk space.
-	if pc := p.pickBlobFileRewriteCompaction(env); pc != nil {
-		return pc
-	}
-
 	if pc := p.pickReadTriggeredCompaction(env); pc != nil {
 		return pc
 	}
@@ -1667,48 +1660,6 @@ func (p *compactionPickerByScore) pickRewriteCompaction(
 		}
 	}
 	return nil
-}
-
-// pickBlobFileRewriteCompaction looks for compactions of blob files that
-// can be rewritten to reclaim disk space.
-func (p *compactionPickerByScore) pickBlobFileRewriteCompaction(
-	env compactionEnv,
-) (pc *pickedBlobFileCompaction) {
-	aggregateStats, heuristicStats := p.latestVersionState.blobFiles.Stats()
-	if heuristicStats.CountFilesEligible == 0 && heuristicStats.CountFilesTooRecent == 0 {
-		// No blob files with any garbage to rewrite.
-		return nil
-	}
-	policy := p.opts.Experimental.ValueSeparationPolicy()
-	if policy.TargetGarbageRatio >= 1.0 {
-		// Blob file rewrite compactions are disabled.
-		return nil
-	}
-	garbagePct := float64(aggregateStats.ValueSize-aggregateStats.ReferencedValueSize) /
-		float64(aggregateStats.ValueSize)
-	if garbagePct <= policy.TargetGarbageRatio {
-		// Not enough garbage to warrant a rewrite compaction.
-		return nil
-	}
-
-	// Check if there is an ongoing blob file rewrite compaction. If there is,
-	// don't schedule a new one.
-	for _, c := range env.inProgressCompactions {
-		if c.kind == compactionKindBlobFileRewrite {
-			return nil
-		}
-	}
-
-	candidate, ok := p.latestVersionState.blobFiles.ReplacementCandidate()
-	if !ok {
-		// None meet the heuristic.
-		return nil
-	}
-	return &pickedBlobFileCompaction{
-		vers:              p.vers,
-		file:              candidate,
-		referencingTables: p.latestVersionState.blobFiles.ReferencingTables(candidate.FileID),
-	}
 }
 
 // pickTombstoneDensityCompaction looks for a compaction that eliminates

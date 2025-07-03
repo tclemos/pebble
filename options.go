@@ -1169,23 +1169,6 @@ type ValueSeparationPolicy struct {
 	// to be eligible for a rewrite that reclaims disk space. Lower values
 	// reduce space amplification at the cost of write amplification
 	RewriteMinimumAge time.Duration
-	// TargetGarbageRatio is a value in the range [0, 1.0] and configures how
-	// aggressively blob files should be written in order to reduce space
-	// amplification induced by value separation. As compactions rewrite blob
-	// files, data may be duplicated.  Older blob files containing the
-	// duplicated data may need to remain because other sstables are referencing
-	// other values contained in the same file.
-	//
-	// The DB can rewrite these blob files in place in order to reduce this
-	// space amplification, but this incurs write amplification. This option
-	// configures how much garbage may accrue before the DB will attempt to
-	// rewrite blob files to reduce it. A value of 0.20 indicates that once 20%
-	// of values in blob files are unreferenced, the DB should attempt to
-	// rewrite blob files to reclaim disk space.
-	//
-	// A value of 1.0 indicates that the DB should never attempt to rewrite blob
-	// files.
-	TargetGarbageRatio float64
 }
 
 // SpanPolicy contains policies that can vary by key range. The zero value is
@@ -1301,32 +1284,28 @@ type DBCompressionSettings struct {
 
 // Predefined compression settings.
 var (
-	DBCompressionNone     = UniformDBCompressionSettings(block.NoCompression)
-	DBCompressionFastest  = UniformDBCompressionSettings(block.FastestCompression)
+	DBCompressionNone     = UniformDBCompressionSettings("NoCompression", block.NoCompression)
+	DBCompressionFastest  = UniformDBCompressionSettings("Fastest", block.FastestCompression)
 	DBCompressionBalanced = func() DBCompressionSettings {
-		cs := DBCompressionSettings{Name: "Balanced"}
-		for i := 0; i < manifest.NumLevels-2; i++ {
-			cs.Levels[i] = block.FastestCompression
-		}
-		cs.Levels[manifest.NumLevels-2] = block.FastCompression     // Zstd1 for value blocks.
-		cs.Levels[manifest.NumLevels-1] = block.BalancedCompression // Zstd1 for data and value blocks.
-		return cs
+		profile := UniformDBCompressionSettings("Balanced", block.FastestCompression)
+		profile.Levels[manifest.NumLevels-2] = block.FastCompression     // Zstd1 for value blocks.
+		profile.Levels[manifest.NumLevels-1] = block.BalancedCompression // Zstd1 for data blocks, Zstd3 for value blocks.
+		return profile
 	}()
 	DBCompressionGood = func() DBCompressionSettings {
-		cs := DBCompressionSettings{Name: "Good"}
-		for i := 0; i < manifest.NumLevels-2; i++ {
-			cs.Levels[i] = block.FastestCompression
-		}
-		cs.Levels[manifest.NumLevels-2] = block.BalancedCompression // Zstd1 for data and value blocks.
-		cs.Levels[manifest.NumLevels-1] = block.GoodCompression     // Zstd3 for data and value blocks.
-		return cs
+		profile := UniformDBCompressionSettings("Good", block.FastestCompression)
+		profile.Levels[manifest.NumLevels-2] = block.BalancedCompression // Zstd1 for data blocks, Zstd3 for value blocks.
+		profile.Levels[manifest.NumLevels-1] = block.GoodCompression     // Zstd3 for data and value blocks.
+		return profile
 	}()
 )
 
 // UniformDBCompressionSettings returns a DBCompressionSettings which uses the
 // same compression profile on all LSM levels.
-func UniformDBCompressionSettings(profile *block.CompressionProfile) DBCompressionSettings {
-	cs := DBCompressionSettings{Name: profile.Name}
+func UniformDBCompressionSettings(
+	name string, profile *block.CompressionProfile,
+) DBCompressionSettings {
+	cs := DBCompressionSettings{Name: name}
 	for i := range cs.Levels {
 		cs.Levels[i] = profile
 	}
@@ -1694,7 +1673,6 @@ func (o *Options) String() string {
 			fmt.Fprintf(&buf, "  minimum_size=%d\n", policy.MinimumSize)
 			fmt.Fprintf(&buf, "  max_blob_reference_depth=%d\n", policy.MaxBlobReferenceDepth)
 			fmt.Fprintf(&buf, "  rewrite_minimum_age=%s\n", policy.RewriteMinimumAge)
-			fmt.Fprintf(&buf, "  target_garbage_ratio=%.2f\n", policy.TargetGarbageRatio)
 		}
 	}
 
@@ -2129,8 +2107,6 @@ func (o *Options) Parse(s string, hooks *ParseHooks) error {
 				valSepPolicy.MaxBlobReferenceDepth, err = strconv.Atoi(value)
 			case "rewrite_minimum_age":
 				valSepPolicy.RewriteMinimumAge, err = time.ParseDuration(value)
-			case "target_garbage_ratio":
-				valSepPolicy.TargetGarbageRatio, err = strconv.ParseFloat(value, 64)
 			default:
 				if hooks != nil && hooks.SkipUnknown != nil && hooks.SkipUnknown(section+"."+key, value) {
 					return nil

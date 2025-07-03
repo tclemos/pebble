@@ -144,7 +144,6 @@ func rewriteDataBlocksInParallel(
 	input []block.HandleWithProperties,
 	from, to []byte,
 	concurrency int,
-	compressionStats *block.CompressionStats,
 	newDataBlockRewriter func() blockRewriter,
 ) ([]blockWithSpan, error) {
 	if !r.Attributes.Has(AttributePointKeys) {
@@ -152,8 +151,6 @@ func rewriteDataBlocksInParallel(
 		return nil, nil
 	}
 	output := make([]blockWithSpan, len(input))
-
-	var compressionStatsMu sync.Mutex
 
 	g := &sync.WaitGroup{}
 	g.Add(concurrency)
@@ -171,11 +168,11 @@ func rewriteDataBlocksInParallel(
 			var compressedBuf []byte
 			var inputBlock, inputBlockBuf []byte
 			checksummer := block.Checksummer{Type: opts.Checksum}
-			compressor := block.MakeCompressor(opts.Compression)
-			defer compressor.Close()
 			// We'll assume all blocks are _roughly_ equal so round-robin static partition
 			// of each worker doing every ith block is probably enough.
 			err := func() error {
+				compressor := block.MakeCompressor(opts.Compression)
+				defer compressor.Close()
 				for i := worker; i < len(input); i += concurrency {
 					bh := input[i]
 					var err error
@@ -204,9 +201,6 @@ func rewriteDataBlocksInParallel(
 			if err != nil {
 				errCh <- workerErr{worker: worker, err: err}
 			}
-			compressionStatsMu.Lock()
-			compressionStats.MergeWith(compressor.Stats())
-			defer compressionStatsMu.Unlock()
 		}()
 	}
 	g.Wait()

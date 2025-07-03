@@ -205,7 +205,14 @@ func Open(dirname string, opts *Options) (db *DB, err error) {
 		}
 	}
 
-	if opts.Cache == nil {
+	// Check for block cache disable environment variable
+	if os.Getenv("PEBBLE_DISABLE_BLOCK_CACHE") == "true" {
+		// Use NoCache implementation - follows same pattern as NoFilterPolicy
+		opts.Cache = cache.NoCache
+		if invariants.Enabled {
+			fmt.Printf("pebble: block cache disabled via PEBBLE_DISABLE_BLOCK_CACHE\n")
+		}
+	} else if opts.Cache == nil {
 		opts.Cache = cache.New(opts.CacheSize)
 		defer opts.Cache.Unref()
 	}
@@ -404,10 +411,19 @@ func Open(dirname string, opts *Options) (db *DB, err error) {
 		}
 	}
 
-	fileCacheSize := FileCacheSize(opts.MaxOpenFiles)
-	if opts.FileCache == nil {
-		opts.FileCache = NewFileCache(opts.Experimental.FileCacheShards, fileCacheSize)
-		defer opts.FileCache.Unref()
+	// Check for file cache disable environment variable
+	if os.Getenv("PEBBLE_DISABLE_FILE_CACHE") == "true" {
+		// Use NoFileCache implementation - follows same pattern as NoCache
+		opts.FileCache = NoFileCache
+		if invariants.Enabled {
+			fmt.Printf("pebble: file cache disabled via PEBBLE_DISABLE_FILE_CACHE\n")
+		}
+	} else {
+		fileCacheSize := FileCacheSize(opts.MaxOpenFiles)
+		if opts.FileCache == nil {
+			opts.FileCache = NewFileCache(opts.Experimental.FileCacheShards, fileCacheSize)
+			defer opts.FileCache.Unref()
+		}
 	}
 	d.fileCache = opts.FileCache.newHandle(d.cacheHandle, d.objProvider, d.opts.LoggerAndTracer, d.opts.MakeReaderOptions(), d.reportCorruption)
 	d.newIters = d.fileCache.newIters

@@ -52,7 +52,7 @@ func TestBlobWriter(t *testing.T) {
 				case l == "---flush---":
 					w.flush()
 				case l == "---add-vblock---":
-					w.beginNewVirtualBlock(BlockID(vBlockID))
+					w.BeginNewVirtualBlock(BlockID(vBlockID))
 					vBlockID++
 				default:
 					h := w.AddValue([]byte(l))

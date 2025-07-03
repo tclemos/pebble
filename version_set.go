@@ -939,7 +939,11 @@ func sizeIfLocal(
 }
 
 func (vs *versionSet) incrementCompactions(
-	kind compactionKind, extraLevels []*compactionLevel, bytesWritten int64, compactionErr error,
+	kind compactionKind,
+	extraLevels []*compactionLevel,
+	pickerMetrics pickedCompactionMetrics,
+	bytesWritten int64,
+	compactionErr error,
 ) {
 	if kind == compactionKindFlush || kind == compactionKindIngestedFlushable {
 		vs.metrics.Flush.Count++
@@ -982,14 +986,10 @@ func (vs *versionSet) incrementCompactions(
 	case compactionKindCopy:
 		vs.metrics.Compact.CopyCount++
 
-	case compactionKindBlobFileRewrite:
-		vs.metrics.Compact.BlobFileRewriteCount++
-
 	default:
 		if invariants.Enabled {
 			panic("unhandled compaction kind")
 		}
-
 	}
 	if len(extraLevels) > 0 {
 		vs.metrics.Compact.MultiLevelCount++
